@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import * as XLSX from 'xlsx';
+import { exportMarksheetXlsx, exportMarksheetCsv } from '../lib/excelExport';
 import {
   Download,
   FileSpreadsheet,
@@ -68,14 +69,23 @@ export const ReviewTabs: React.FC<ReviewTabsProps> = ({
     .sort((a, b) => a - b);
 
   const buildExportRows = () => {
+    const hasAnyFeedback = rolls.some((r) => editedCards[r]);
+    const rollKey = vault.rollColumnKey || 'Roll No';
+    const nameKey = vault.nameColumnKey || 'Student Name';
+
     return rolls.map((roll) => {
       const orig = vault.originalRows[roll] ?? {};
       const row: Record<string, string | number> = {
-        ...orig,
-        [vault.rollColumnKey || 'Roll No']: roll,
-        [vault.nameColumnKey || 'Student Name']:
-          vault.rollToName[roll] ?? `Roll ${roll}`,
+        [rollKey]: roll,
+        [nameKey]: vault.rollToName[roll] ?? `Roll ${roll}`,
       };
+
+      for (const [k, v] of Object.entries(orig)) {
+        if (k !== rollKey && k !== nameKey) {
+          row[k] = v ?? '';
+        }
+      }
+
       const rScores = scoresByRoll[roll] ?? {};
       let total = 0;
       let count = 0;
@@ -90,22 +100,34 @@ export const ReviewTabs: React.FC<ReviewTabsProps> = ({
         }
       }
       row['Total'] = count > 0 ? total : '';
-      const card = editedCards[roll];
-      if (card) {
-        row['Feedback (EN)'] = card.english;
-        row['Feedback (HI)'] = card.hindi;
+
+      if (hasAnyFeedback) {
+        const card = editedCards[roll];
+        row['Feedback (EN)'] = card?.english ?? '';
+        row['Feedback (HI)'] = card?.hindi ?? '';
       }
       return row;
     });
   };
 
-  const handleDownload = (format: 'xlsx' | 'csv') => {
+  const handleDownload = async (format: 'xlsx' | 'csv') => {
     const rows = buildExportRows();
-    const ws = XLSX.utils.json_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'GuruVaani_Marksheet');
     const filename = `guru-vaani-${mode}-marksheet.${format}`;
-    XLSX.writeFile(wb, filename, { bookType: format });
+
+    if (format === 'xlsx') {
+      await exportMarksheetXlsx({
+        filename,
+        sheetName: 'GuruVaani_Marksheet',
+        rows,
+        anchors,
+        rollKey: vault.rollColumnKey || 'Roll No',
+        nameKey: vault.nameColumnKey || 'Student Name',
+      });
+    } else {
+      const ws = XLSX.utils.json_to_sheet(rows);
+      const csvContent = XLSX.utils.sheet_to_csv(ws);
+      exportMarksheetCsv(filename, csvContent);
+    }
   };
 
   // Compute per-anchor struggle % (< 50% of maxMarks) + recurring tags from exportData

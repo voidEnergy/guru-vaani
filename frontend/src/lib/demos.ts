@@ -116,3 +116,43 @@ export const SAMPLE_UTTERANCES: SampleUtterance[] = [
     transcript: 'Kitne baaki hain?',
   },
 ];
+
+export const ORAL_SAMPLE_UTTERANCES: SampleUtterance[] = [
+  {
+    id: 'oral-compound',
+    label: '1. Multi-Rubric + Fraction',
+    badge: 'Multi-slice',
+    transcript:
+      'Roll 103 Clarity aath, Depth paanch, Ethics saadhe saat, Composure nau',
+  },
+  {
+    id: 'oral-selftalk',
+    label: '2. Pure Self-Talk',
+    badge: 'Ignored',
+    transcript: 'Are ye kya bol raha hai',
+  },
+  {
+    id: 'oral-oob',
+    label: '3. Out-of-Bounds (12/10)',
+    badge: 'Rejected',
+    transcript: 'Roll 105 Clarity baarah',
+  },
+  {
+    id: 'oral-edit',
+    label: '4. Single Edit',
+    badge: 'Edit',
+    transcript: 'Roll 103 Depth ko saat kar do',
+  },
+  {
+    id: 'oral-grace',
+    label: '5. Bulk Grace',
+    badge: 'Confirm',
+    transcript: 'Sabko Ethics mein ek grace mark',
+  },
+  {
+    id: 'oral-status',
+    label: '6. Status Query',
+    badge: 'Status',
+    transcript: 'Kitne baaki hain?',
+  },
+];

@@ -1,6 +1,58 @@
 import type { ReplyMode } from '../types';
 
 let sharedAudioCtx: AudioContext | null = null;
+let speakingState = false;
+let cooldownTimer: number | null = null;
+let micAbortHandler: (() => void) | null = null;
+const speakingListeners = new Set<(speaking: boolean) => void>();
+
+function setSpeakingState(next: boolean): void {
+  if (speakingState === next) return;
+  speakingState = next;
+  speakingListeners.forEach((cb) => {
+    try {
+      cb(next);
+    } catch {
+      // ignore subscriber errors
+    }
+  });
+}
+
+export function getIsSpeaking(): boolean {
+  return speakingState;
+}
+
+export function subscribeSpeaking(cb: (speaking: boolean) => void): () => void {
+  speakingListeners.add(cb);
+  cb(speakingState);
+  return () => {
+    speakingListeners.delete(cb);
+  };
+}
+
+export function registerMicAbortHandler(handler: (() => void) | null): () => void {
+  micAbortHandler = handler;
+  return () => {
+    if (micAbortHandler === handler) {
+      micAbortHandler = null;
+    }
+  };
+}
+
+export function stopSpeaking(): void {
+  if (cooldownTimer !== null) {
+    window.clearTimeout(cooldownTimer);
+    cooldownTimer = null;
+  }
+  if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+    try {
+      window.speechSynthesis.cancel();
+    } catch {
+      // ignore speechSynthesis errors
+    }
+  }
+  setSpeakingState(false);
+}
 
 function getAudioContext(): AudioContext | null {
   if (typeof window === 'undefined') return null;
@@ -73,18 +125,43 @@ export function triggerHaptic(pattern: number | number[] = 40): void {
 export function speakText(text: string, lang: 'en-IN' | 'hi-IN' = 'en-IN'): void {
   if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
   try {
+    if (cooldownTimer !== null) {
+      window.clearTimeout(cooldownTimer);
+      cooldownTimer = null;
+    }
+    // Half-duplex gating: abort any active SpeechRecognition before TTS starts
+    micAbortHandler?.();
     window.speechSynthesis.cancel();
+
     const utter = new SpeechSynthesisUtterance(text);
     utter.lang = lang;
     utter.rate = 1.02;
     const voices = window.speechSynthesis.getVoices();
     const matched = voices.find((v) => v.lang.toLowerCase().startsWith(lang.toLowerCase().split('-')[0]));
     if (matched) utter.voice = matched;
+
+    const handleEnd = () => {
+      if (cooldownTimer !== null) {
+        window.clearTimeout(cooldownTimer);
+      }
+      // 250 ms post-speech cooldown before passive capture resumes
+      cooldownTimer = window.setTimeout(() => {
+        cooldownTimer = null;
+        setSpeakingState(false);
+      }, 250);
+    };
+
+    utter.onend = handleEnd;
+    utter.onerror = handleEnd;
+
+    setSpeakingState(true);
     window.speechSynthesis.speak(utter);
   } catch {
-    // ignore speechSynthesis errors
+    setSpeakingState(false);
   }
 }
+
+export const speak = speakText;
 
 export function notifyAction(
   message: string,

@@ -306,8 +306,9 @@ export function App() {
 
         if (res.roll_no) setActiveRoll(res.roll_no);
 
-        if (errorMessages.length > 0 && savedMessages.length === 0) {
-          const errText = errorMessages.join(' | ');
+        if (res.ok === false || (errorMessages.length > 0 && savedMessages.length === 0)) {
+          const errText =
+            errorMessages.join(' | ') || res.voice_error || res.message || 'Command rejected.';
           setStatusBanner({ type: 'error', text: errText });
           appendLog(transcript, 'error', errText);
           notifyAction(errText, replyMode, 'error', speechLocale);
@@ -322,7 +323,8 @@ export function App() {
             text: fullText,
           });
           appendLog(transcript, isEdit ? 'edit' : 'save', fullText);
-          notifyAction(okText, replyMode, 'success', speechLocale);
+          const spokenText = `Roll ${res.roll_no} saved, ${res.total}`;
+          notifyAction(spokenText, replyMode, 'success', speechLocale);
           void syncFromBackend(sessionId);
         }
         return;
@@ -341,10 +343,14 @@ export function App() {
         }));
         setActiveRoll(entry.roll_no);
         triggerRowFlash(entry.roll_no, isEdit ? 'amber' : 'green');
-        const msg = res.message ?? `Saved Roll ${entry.roll_no} ${entry.anchor} = ${entry.score}`;
+        const totalSuffix = res.total !== undefined ? ` (Total ${res.total})` : '';
+        const msg = res.message
+          ? `${res.message}${totalSuffix}`
+          : `Saved Roll ${entry.roll_no} ${entry.anchor} = ${entry.score}${totalSuffix}`;
         setStatusBanner({ type: isEdit ? 'edit' : 'save', text: msg });
         appendLog(transcript, isEdit ? 'edit' : 'save', msg);
-        notifyAction(msg, replyMode, 'success', speechLocale);
+        const spokenText = `Roll ${entry.roll_no} saved, ${res.total ?? entry.score}`;
+        notifyAction(spokenText, replyMode, 'success', speechLocale);
         void syncFromBackend(sessionId);
         return;
       }

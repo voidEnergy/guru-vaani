@@ -104,35 +104,52 @@ export const GradingWorkspace: React.FC<GradingWorkspaceProps> = ({
 
   return (
     <div className="mx-auto max-w-7xl p-3 sm:p-5">
-      {/* Inline Bulk Grace Confirm/Cancel Modal */}
+      {/* Centered Fixed Bulk Grace Confirm/Cancel Modal Overlay */}
       {pendingGrace && (
-        <div className="mb-4 flex flex-col justify-between gap-3 rounded-2xl border-2 border-amber-400 bg-amber-50 p-4 shadow-md sm:flex-row sm:items-center">
-          <div className="flex items-start gap-3">
-            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
-            <div>
-              <h3 className="text-sm font-bold text-amber-950">
-                Confirm Bulk Grace Marks (+{pendingGrace.marks})
-              </h3>
-              <p className="text-xs text-amber-800">{pendingGrace.message}</p>
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-xs"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="bulk-grace-modal-title"
+        >
+          <div className="w-full max-w-md rounded-2xl border-2 border-amber-400 bg-amber-50 p-5 shadow-2xl">
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-100 text-amber-700">
+                <AlertTriangle className="h-5 w-5" />
+              </div>
+              <div>
+                <h3
+                  id="bulk-grace-modal-title"
+                  className="text-base font-bold text-amber-950"
+                >
+                  Confirm Bulk Grace Marks (+{pendingGrace.marks})
+                </h3>
+                <p className="mt-1 text-sm text-amber-900">{pendingGrace.message}</p>
+                <p className="mt-1.5 text-xs font-medium text-amber-700">
+                  You can also say &ldquo;confirm&rdquo; or &ldquo;cancel&rdquo; by voice.
+                </p>
+              </div>
             </div>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <button
-              type="button"
-              onClick={() => onConfirmGrace('cancel')}
-              className="inline-flex items-center gap-1 rounded-xl border border-amber-300 bg-white px-3.5 py-2 text-xs font-semibold text-amber-900 hover:bg-amber-100"
-            >
-              <X className="h-3.5 w-3.5" />
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={() => onConfirmGrace('confirm')}
-              className="inline-flex items-center gap-1 rounded-xl bg-amber-600 px-4 py-2 text-xs font-semibold text-white shadow-xs hover:bg-amber-700"
-            >
-              <Check className="h-3.5 w-3.5" />
-              Confirm Grace
-            </button>
+            <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                onClick={() => onConfirmGrace('cancel')}
+                disabled={isProcessing}
+                className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-amber-300 bg-white px-4 py-2.5 text-sm font-semibold text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+              >
+                <X className="h-4 w-4" />
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => onConfirmGrace('confirm')}
+                disabled={isProcessing}
+                className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-amber-600 px-5 py-2.5 text-sm font-bold text-white shadow-sm hover:bg-amber-700 disabled:opacity-50"
+              >
+                <Check className="h-4 w-4" />
+                Confirm Grace
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -372,6 +389,7 @@ export const GradingWorkspace: React.FC<GradingWorkspaceProps> = ({
         {/* Right Column: Mic Console + Recent Activity */}
         <div className="flex flex-col gap-4 lg:col-span-5">
           <MicConsole
+            mode={mode}
             speechLocale={speechLocale}
             onSpeechLocaleChange={onSpeechLocaleChange}
             onSubmitTranscript={onSubmitTranscript}

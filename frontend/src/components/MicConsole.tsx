@@ -7,9 +7,15 @@ import {
   BarChart3,
   Sparkles,
   Keyboard,
+  Volume2,
 } from 'lucide-react';
-import type { SpeechLocale } from '../types';
-import { SAMPLE_UTTERANCES } from '../lib/demos';
+import type { GradingMode, SpeechLocale } from '../types';
+import { ORAL_SAMPLE_UTTERANCES, SAMPLE_UTTERANCES } from '../lib/demos';
+import {
+  registerMicAbortHandler,
+  stopSpeaking,
+  subscribeSpeaking,
+} from '../lib/audio';
 
 interface SpeechRecognitionEventLike {
   results: {
@@ -30,9 +36,11 @@ interface SpeechRecognitionLike {
   onend: (() => void) | null;
   start: () => void;
   stop: () => void;
+  abort?: () => void;
 }
 
 interface MicConsoleProps {
+  mode: GradingMode;
   speechLocale: SpeechLocale;
   onSpeechLocaleChange: (loc: SpeechLocale) => void;
   onSubmitTranscript: (transcript: string) => void;
@@ -46,6 +54,7 @@ interface MicConsoleProps {
 }
 
 export const MicConsole: React.FC<MicConsoleProps> = ({
+  mode,
   speechLocale,
   onSpeechLocaleChange,
   onSubmitTranscript,
@@ -55,13 +64,58 @@ export const MicConsole: React.FC<MicConsoleProps> = ({
   statusBanner,
 }) => {
   const [isListening, setIsListening] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const [micMode, setMicMode] = useState<'toggle' | 'hold'>('toggle');
   const [liveTranscript, setLiveTranscript] = useState('');
   const [manualText, setManualText] = useState('');
   const [speechSupported, setSpeechSupported] = useState(true);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const finalTranscriptRef = useRef('');
+  const latestTranscriptRef = useRef('');
   const isListeningRef = useRef(false);
+  const activeCaptureModeRef = useRef<'toggle' | 'hold'>('toggle');
+  const silenceTimerRef = useRef<number | null>(null);
+  const bargeInTimerRef = useRef<number | null>(null);
+
+  const clearSilenceTimer = () => {
+    if (silenceTimerRef.current !== null) {
+      window.clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+  };
+
+  const clearBargeInTimer = () => {
+    if (bargeInTimerRef.current !== null) {
+      window.clearTimeout(bargeInTimerRef.current);
+      bargeInTimerRef.current = null;
+    }
+  };
+
+  const abortListening = () => {
+    clearBargeInTimer();
+    clearSilenceTimer();
+    finalTranscriptRef.current = '';
+    latestTranscriptRef.current = '';
+    setLiveTranscript('');
+    const rec = recognitionRef.current;
+    recognitionRef.current = null;
+    if (rec) {
+      try {
+        rec.onresult = null;
+        rec.onend = null;
+        rec.onerror = null;
+        if (typeof rec.abort === 'function') {
+          rec.abort();
+        } else {
+          rec.stop();
+        }
+      } catch {
+        // ignore
+      }
+    }
+    isListeningRef.current = false;
+    setIsListening(false);
+  };
 
   useEffect(() => {
     const win = window as unknown as {
@@ -71,9 +125,30 @@ export const MicConsole: React.FC<MicConsoleProps> = ({
     if (!win.SpeechRecognition && !win.webkitSpeechRecognition) {
       setSpeechSupported(false);
     }
+    const unsubSpeaking = subscribeSpeaking(setIsSpeaking);
+    const unsubAbort = registerMicAbortHandler(abortListening);
+    return () => {
+      unsubSpeaking();
+      unsubAbort();
+      clearBargeInTimer();
+      clearSilenceTimer();
+    };
   }, []);
 
-  const startListening = () => {
+  const stopListening = () => {
+    clearBargeInTimer();
+    clearSilenceTimer();
+    if (!isListeningRef.current) return;
+    try {
+      recognitionRef.current?.stop();
+    } catch {
+      // ignore
+    }
+    isListeningRef.current = false;
+    setIsListening(false);
+  };
+
+  const startListening = (captureMode: 'toggle' | 'hold' = micMode) => {
     if (isListeningRef.current || isProcessing) return;
     const win = window as unknown as {
       SpeechRecognition?: new () => SpeechRecognitionLike;
@@ -85,64 +160,79 @@ export const MicConsole: React.FC<MicConsoleProps> = ({
       return;
     }
 
-    try {
-      const rec = new SpeechRec();
-      rec.lang = speechLocale;
-      rec.continuous = true;
-      rec.interimResults = true;
-      finalTranscriptRef.current = '';
-      setLiveTranscript('');
+    // Instant Barge-In: stop any active TTS immediately and wait 150 ms before recognition.start()
+    stopSpeaking();
+    clearBargeInTimer();
+    clearSilenceTimer();
+    activeCaptureModeRef.current = captureMode;
+    finalTranscriptRef.current = '';
+    latestTranscriptRef.current = '';
+    setLiveTranscript('');
+    isListeningRef.current = true;
+    setIsListening(true);
 
-      rec.onresult = (event: SpeechRecognitionEventLike) => {
-        let interim = '';
-        let finalStr = '';
-        for (let i = 0; i < event.results.length; i++) {
-          const res = event.results[i];
-          if (res.isFinal) {
-            finalStr += res[0].transcript + ' ';
-          } else {
-            interim += res[0].transcript;
+    bargeInTimerRef.current = window.setTimeout(() => {
+      bargeInTimerRef.current = null;
+      if (!isListeningRef.current) return;
+      try {
+        const rec = new SpeechRec();
+        rec.lang = speechLocale;
+        rec.continuous = true;
+        rec.interimResults = true;
+
+        rec.onresult = (event: SpeechRecognitionEventLike) => {
+          let interim = '';
+          let finalStr = '';
+          for (let i = 0; i < event.results.length; i++) {
+            const res = event.results[i];
+            if (res.isFinal) {
+              finalStr += res[0].transcript + ' ';
+            } else {
+              interim += res[0].transcript;
+            }
           }
-        }
-        finalTranscriptRef.current = finalStr.trim();
-        setLiveTranscript((finalStr + interim).trim());
-      };
+          const combined = (finalStr + interim).trim();
+          finalTranscriptRef.current = finalStr.trim();
+          latestTranscriptRef.current = combined;
+          setLiveTranscript(combined);
 
-      rec.onerror = () => {
+          if (activeCaptureModeRef.current === 'toggle' && combined) {
+            clearSilenceTimer();
+            silenceTimerRef.current = window.setTimeout(() => {
+              stopListening();
+            }, 1600);
+          }
+        };
+
+        rec.onerror = () => {
+          clearSilenceTimer();
+          isListeningRef.current = false;
+          setIsListening(false);
+        };
+
+        rec.onend = () => {
+          clearSilenceTimer();
+          isListeningRef.current = false;
+          setIsListening(false);
+          const text = (
+            finalTranscriptRef.current || latestTranscriptRef.current
+          ).trim();
+          if (text) {
+            onSubmitTranscript(text);
+            finalTranscriptRef.current = '';
+            latestTranscriptRef.current = '';
+            setLiveTranscript('');
+          }
+        };
+
+        recognitionRef.current = rec;
+        rec.start();
+      } catch {
+        clearSilenceTimer();
         isListeningRef.current = false;
         setIsListening(false);
-      };
-
-      rec.onend = () => {
-        isListeningRef.current = false;
-        setIsListening(false);
-        const text = finalTranscriptRef.current.trim();
-        if (text) {
-          onSubmitTranscript(text);
-          finalTranscriptRef.current = '';
-          setLiveTranscript('');
-        }
-      };
-
-      recognitionRef.current = rec;
-      rec.start();
-      isListeningRef.current = true;
-      setIsListening(true);
-    } catch {
-      isListeningRef.current = false;
-      setIsListening(false);
-    }
-  };
-
-  const stopListening = () => {
-    if (!isListeningRef.current) return;
-    try {
-      recognitionRef.current?.stop();
-    } catch {
-      // ignore
-    }
-    isListeningRef.current = false;
-    setIsListening(false);
+      }
+    }, 150);
   };
 
   // Spacebar push-to-talk (when not typing in an input/textarea)
@@ -154,7 +244,7 @@ export const MicConsole: React.FC<MicConsoleProps> = ({
         return;
       }
       e.preventDefault();
-      startListening();
+      startListening('hold');
     };
     const handleKeyUp = (e: KeyboardEvent) => {
       if (e.code !== 'Space') return;
@@ -177,9 +267,12 @@ export const MicConsole: React.FC<MicConsoleProps> = ({
     e.preventDefault();
     const trimmed = manualText.trim();
     if (!trimmed || isProcessing) return;
+    stopSpeaking();
     onSubmitTranscript(trimmed);
     setManualText('');
   };
+
+  const sampleList = mode === 'oral' ? ORAL_SAMPLE_UTTERANCES : SAMPLE_UTTERANCES;
 
   return (
     <div className="flex flex-col gap-3">
@@ -222,12 +315,15 @@ export const MicConsole: React.FC<MicConsoleProps> = ({
         </div>
 
         <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-2">
-          {SAMPLE_UTTERANCES.map((sample) => (
+          {sampleList.map((sample) => (
             <button
               key={sample.id}
               type="button"
               disabled={isProcessing}
-              onClick={() => onSubmitTranscript(sample.transcript)}
+              onClick={() => {
+                stopSpeaking();
+                onSubmitTranscript(sample.transcript);
+              }}
               title={sample.transcript}
               className="flex flex-col items-start rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-left transition hover:border-indigo-300 hover:bg-indigo-50/50 disabled:opacity-50"
             >
@@ -247,7 +343,11 @@ export const MicConsole: React.FC<MicConsoleProps> = ({
             type="text"
             value={manualText}
             onChange={(e) => setManualText(e.target.value)}
-            placeholder='Type Hinglish command (e.g. "Roll 14 Q1 saadhe saat")'
+            placeholder={
+              mode === 'oral'
+                ? 'Type Hinglish command (e.g. "Roll 103 Clarity saadhe saat")'
+                : 'Type Hinglish command (e.g. "Roll 14 Q1 saadhe saat")'
+            }
             className="min-w-0 flex-1 rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:bg-white focus:ring-2 focus:ring-indigo-200 focus:outline-none"
           />
           <button
@@ -265,12 +365,20 @@ export const MicConsole: React.FC<MicConsoleProps> = ({
       <div className="sticky bottom-2 z-20 rounded-2xl border border-slate-200 bg-slate-900 p-3 text-white shadow-xl lg:static">
         <div className="flex items-center justify-between gap-2 text-[11px]">
           {/* Speech Locale Toggle */}
-          <div className="flex items-center gap-1 rounded-lg bg-slate-800 p-0.5">
+          <div
+            className="flex items-center gap-1 rounded-lg bg-slate-800 p-0.5"
+            title="en-IN handles Hinglish best; hi-IN supports full Devanagari Hindi"
+          >
             {(['en-IN', 'hi-IN'] as SpeechLocale[]).map((loc) => (
               <button
                 key={loc}
                 type="button"
                 onClick={() => onSpeechLocaleChange(loc)}
+                title={
+                  loc === 'en-IN'
+                    ? 'en-IN handles Hinglish best'
+                    : 'hi-IN supports full Devanagari Hindi'
+                }
                 className={`rounded-md px-2 py-1 font-medium transition ${
                   speechLocale === loc
                     ? 'bg-indigo-600 text-white'
@@ -312,7 +420,10 @@ export const MicConsole: React.FC<MicConsoleProps> = ({
           <div className="flex items-center gap-1">
             <button
               type="button"
-              onClick={() => onQuickCommand('undo')}
+              onClick={() => {
+                stopSpeaking();
+                onQuickCommand('undo');
+              }}
               disabled={isProcessing}
               title="Undo last action"
               className="inline-flex items-center gap-1 rounded-lg bg-slate-800 px-2 py-1 text-slate-200 hover:bg-slate-700 disabled:opacity-40"
@@ -322,7 +433,10 @@ export const MicConsole: React.FC<MicConsoleProps> = ({
             </button>
             <button
               type="button"
-              onClick={() => onQuickCommand('status')}
+              onClick={() => {
+                stopSpeaking();
+                onQuickCommand('status');
+              }}
               disabled={isProcessing}
               title="Check grading status"
               className="inline-flex items-center gap-1 rounded-lg bg-slate-800 px-2 py-1 text-slate-200 hover:bg-slate-700 disabled:opacity-40"
@@ -332,6 +446,14 @@ export const MicConsole: React.FC<MicConsoleProps> = ({
             </button>
           </div>
         </div>
+
+        {/* TTS Active Hint */}
+        {isSpeaking && !isListening && (
+          <div className="mt-2 flex items-center gap-1.5 rounded-lg bg-indigo-950/90 px-3 py-1.5 text-xs font-medium text-indigo-200 ring-1 ring-indigo-500/40">
+            <Volume2 className="h-3.5 w-3.5 shrink-0 animate-pulse text-indigo-400" />
+            <span>Speaking... Tap Mic to interrupt</span>
+          </div>
+        )}
 
         {/* Live Transcript Preview */}
         {liveTranscript && (
@@ -347,10 +469,10 @@ export const MicConsole: React.FC<MicConsoleProps> = ({
             disabled={!speechSupported || isProcessing}
             onClick={
               micMode === 'toggle'
-                ? () => (isListening ? stopListening() : startListening())
+                ? () => (isListening ? stopListening() : startListening('toggle'))
                 : undefined
             }
-            onPointerDown={micMode === 'hold' ? startListening : undefined}
+            onPointerDown={micMode === 'hold' ? () => startListening('hold') : undefined}
             onPointerUp={micMode === 'hold' ? stopListening : undefined}
             onPointerLeave={
               micMode === 'hold' && isListening ? stopListening : undefined

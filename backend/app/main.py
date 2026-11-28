@@ -103,6 +103,17 @@ def _engine_info_from_headers(
     return get_engine_info(gemini_key=x_gemini_key, openai_key=x_openai_key)
 
 
+def _schema_error(sess: GradeSession, mode: str, anchor: Optional[str]) -> Optional[str]:
+    if not anchor:
+        return None
+    canonical = sess.canonicalize_anchor(anchor)
+    if mode == "written" and sess.config.questions and canonical not in sess.config.questions:
+        return f"{anchor} is not in this exam. Valid questions: {', '.join(sess.config.questions)}."
+    if mode == "oral" and sess.config.rubric_items and canonical not in sess.config.rubric_items:
+        return f"{anchor} is not in this exam. Valid rubric items: {', '.join(sess.config.rubric_items)}."
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -152,7 +163,12 @@ async def voice_command(
     mode = body.mode or sess.config.mode
     engine = _engine_info_from_headers(x_gemini_key, x_openai_key)
 
-    parsed = route_intent(body.transcript, mode=mode)
+    parsed = route_intent(
+        body.transcript,
+        mode=mode,
+        questions=sess.config.questions,
+        rubric_items=sess.config.rubric_items,
+    )
     intent = parsed.intent
 
     # --- IGNORE ---
@@ -194,9 +210,20 @@ async def voice_command(
                 "intent": "bulk_grace",
                 "ok": False,
                 "message": "Could not parse grace marks amount from utterance.",
+                "voice_error": "Please specify the grace mark amount.",
                 "engine": engine,
             }
-        result = sess.queue_bulk_grace(parsed.grace_marks)
+        if not parsed.question:
+            target_type = "rubric item" if mode == "oral" else "question"
+            msg = f"Please specify which {target_type} to apply grace marks to."
+            return {
+                "intent": "bulk_grace",
+                "ok": False,
+                "message": msg,
+                "voice_error": msg,
+                "engine": engine,
+            }
+        result = sess.queue_bulk_grace(parsed.grace_marks, question=parsed.question)
         return {"intent": "bulk_grace", **result, "engine": engine}
 
     # --- GRADE / EDIT ---
@@ -204,7 +231,13 @@ async def voice_command(
         is_edit = intent == "EDIT"
 
         # Try multi-anchor slicing first
-        segments = slice_by_anchors(body.transcript, mode=mode)
+        segments = slice_by_anchors(
+            body.transcript,
+            mode=mode,
+            questions=sess.config.questions,
+            rubric_items=sess.config.rubric_items,
+        )
+        scored_segments = [seg for seg in segments if seg["score"] is not None]
 
         roll_no = parsed.roll_no
         if roll_no is None and segments:
@@ -213,36 +246,62 @@ async def voice_command(
                     roll_no = seg["roll_no"]
                     break
 
-        if segments and roll_no is not None:
+        if scored_segments and roll_no is not None:
             results = []
-            for seg in segments:
-                if seg["score"] is None:
-                    continue
+            for seg in scored_segments:
                 seg_roll = seg.get("roll_no") or roll_no
-                r = sess.apply_grade(
-                    roll_no=seg_roll,
-                    anchor=seg["anchor"],
-                    score=seg["score"],
-                    comment=seg["comment"],
-                    is_edit=is_edit,
-                )
+                schema_err = _schema_error(sess, mode, seg["anchor"])
+                if schema_err:
+                    r = {"ok": False, "message": schema_err, "voice_error": schema_err}
+                else:
+                    r = sess.apply_grade(
+                        roll_no=seg_roll,
+                        anchor=seg["anchor"],
+                        score=seg["score"],
+                        comment=seg["comment"],
+                        is_edit=is_edit,
+                    )
                 results.append({**r, "anchor": seg["anchor"], "roll_no": seg_roll})
 
+            if results and all(not r.get("ok") for r in results):
+                err_msg = " | ".join(
+                    r.get("voice_error") or r.get("message", "Command rejected.")
+                    for r in results
+                )
+                return {
+                    "intent": intent.lower(),
+                    "ok": False,
+                    "roll_no": roll_no,
+                    "message": err_msg,
+                    "voice_error": err_msg,
+                    "results": results,
+                    "engine": engine,
+                }
+
             total = sum(
-                r["entry"]["score"]
-                for r in results
-                if r.get("ok") and "entry" in r and r["entry"].get("score") is not None
+                entry.score
+                for entry in sess.scores.get(roll_no, {}).values()
             )
-            return {
+            response: dict[str, Any] = {
                 "intent": intent.lower(),
+                "ok": True,
                 "multi": True,
                 "roll_no": roll_no,
                 "total": round(total, 2),
                 "results": results,
                 "engine": engine,
             }
+            unscored_anchors = list(
+                dict.fromkeys(seg["anchor"] for seg in segments if seg["score"] is None)
+            )
+            if unscored_anchors:
+                note = f"Missing score for {', '.join(unscored_anchors)} — skipped."
+                response["warning"] = note
+                response["message"] = note
+                response["skipped_anchors"] = unscored_anchors
+            return response
 
-        # Single grade
+        # Single grade or incomplete command
         if parsed.roll_no is None:
             return {
                 "intent": intent.lower(),
@@ -251,7 +310,41 @@ async def voice_command(
                 "voice_error": "Please say the roll number before the score.",
                 "engine": engine,
             }
-        if parsed.anchor is None:
+        if parsed.score is None:
+            roll_err = sess._validate_roll(parsed.roll_no)
+            if roll_err:
+                return {
+                    "intent": intent.lower(),
+                    "ok": False,
+                    "roll_no": parsed.roll_no,
+                    "message": roll_err,
+                    "voice_error": roll_err,
+                    "engine": engine,
+                }
+            schema_err = _schema_error(sess, mode, parsed.question)
+            if schema_err:
+                return {
+                    "intent": intent.lower(),
+                    "ok": False,
+                    "roll_no": parsed.roll_no,
+                    "message": schema_err,
+                    "voice_error": schema_err,
+                    "engine": engine,
+                }
+            if parsed.question:
+                msg = f"Heard Roll {parsed.roll_no} {parsed.question} — please include the marks."
+            else:
+                target = "rubric item" if mode == "oral" else "question"
+                msg = f"Heard Roll {parsed.roll_no} — please include the {target} and marks."
+            return {
+                "intent": intent.lower(),
+                "ok": False,
+                "roll_no": parsed.roll_no,
+                "message": msg,
+                "voice_error": msg,
+                "engine": engine,
+            }
+        if parsed.question is None:
             return {
                 "intent": intent.lower(),
                 "ok": False,
@@ -259,18 +352,20 @@ async def voice_command(
                 "voice_error": "Please say the question or rubric item before the score.",
                 "engine": engine,
             }
-        if parsed.score is None:
+        schema_err = _schema_error(sess, mode, parsed.question)
+        if schema_err:
             return {
                 "intent": intent.lower(),
                 "ok": False,
-                "message": "Score not found in utterance.",
-                "voice_error": "Please say the score value clearly.",
+                "roll_no": parsed.roll_no,
+                "message": schema_err,
+                "voice_error": schema_err,
                 "engine": engine,
             }
 
         result = sess.apply_grade(
             roll_no=parsed.roll_no,
-            anchor=parsed.anchor,
+            anchor=parsed.question,
             score=parsed.score,
             comment=parsed.sanitized_comment,
             is_edit=is_edit,
@@ -285,7 +380,17 @@ async def voice_command(
             if enhanced:
                 result["enhanced_comment"] = enhanced
 
-        return {"intent": intent.lower(), **result, "engine": engine}
+        student_total = round(
+            sum(entry.score for entry in sess.scores.get(parsed.roll_no, {}).values()),
+            2,
+        )
+        return {
+            "intent": intent.lower(),
+            "roll_no": parsed.roll_no,
+            "total": student_total,
+            **result,
+            "engine": engine,
+        }
 
     return {"intent": "unknown", "ok": False, "message": "Unrecognized intent.", "engine": engine}
 

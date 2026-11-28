@@ -91,7 +91,20 @@ class GradeSession:
             )
         return None
 
+    def canonicalize_anchor(self, anchor: str) -> str:
+        """Canonicalize an anchor case-insensitively to its exact schema key."""
+        if not anchor:
+            return anchor
+        if self.config.mode == "written" and self.config.questions:
+            q_map = {q.lower(): q for q in self.config.questions}
+            return q_map.get(anchor.lower(), anchor)
+        if self.config.mode == "oral" and self.config.rubric_items:
+            r_map = {r.lower(): r for r in self.config.rubric_items}
+            return r_map.get(anchor.lower(), anchor)
+        return anchor
+
     def _validate_anchor(self, anchor: str) -> Optional[str]:
+        anchor = self.canonicalize_anchor(anchor)
         if self.config.mode == "written" and self.config.questions:
             if anchor not in self.config.questions:
                 return f"Question '{anchor}' is not in the question list."
@@ -123,6 +136,7 @@ class GradeSession:
         if err:
             return {"ok": False, "message": err, "voice_error": err}
 
+        anchor = self.canonicalize_anchor(anchor)
         err = self._validate_anchor(anchor)
         if err:
             return {"ok": False, "message": err, "voice_error": err}
@@ -181,19 +195,31 @@ class GradeSession:
     # Bulk Grace
     # ------------------------------------------------------------------
 
-    def queue_bulk_grace(self, marks: float) -> dict[str, Any]:
+    def queue_bulk_grace(self, marks: float, question: Optional[str] = None) -> dict[str, Any]:
         """Stage a bulk-grace operation waiting for confirmation."""
         err = self._validate_score(marks)
         if err:
             return {"ok": False, "message": err, "voice_error": err}
-        self.pending_grace = {"marks": marks}
+
+        if not question:
+            target_type = "rubric item" if self.config.mode == "oral" else "question"
+            msg = f"Please specify which {target_type} to apply grace marks to."
+            return {"ok": False, "message": msg, "voice_error": msg}
+
+        question = self.canonicalize_anchor(question)
+        err = self._validate_anchor(question)
+        if err:
+            return {"ok": False, "message": err, "voice_error": err}
+
+        self.pending_grace = {"marks": marks, "question": question}
         affected = len(self.scores)
+        max_m = int(self.config.max_marks) if self.config.max_marks == int(self.config.max_marks) else self.config.max_marks
         return {
             "ok": True,
             "pending": True,
             "message": (
-                f"About to add {marks} grace mark(s) to all {affected} student(s). "
-                f"Say 'confirm' to apply or 'cancel' to abort."
+                f"About to add {marks} grace mark(s) to {question} for all {affected} graded student(s) "
+                f"(capped at max {max_m}). Say 'confirm' to apply or 'cancel' to abort."
             ),
         }
 
@@ -201,15 +227,39 @@ class GradeSession:
         if not self.pending_grace:
             return {"ok": False, "message": "No pending grace operation."}
         marks = self.pending_grace["marks"]
-        self._push_undo(f"bulk_grace +{marks}")
-        count = 0
-        for roll_scores in self.scores.values():
-            for entry in roll_scores.values():
-                new_score = min(entry.score + marks, self.config.max_marks)
-                entry.score = new_score
-                count += 1
-        self.pending_grace = None
-        return {"ok": True, "message": f"Grace of {marks} applied to {count} score(s)."}
+        question = self.pending_grace.get("question")
+        self._push_undo(f"bulk_grace {question} +{marks}" if question else f"bulk_grace +{marks}")
+
+        affected_students = len(self.scores)
+        if question:
+            for roll_no, roll_scores in self.scores.items():
+                if question in roll_scores:
+                    entry = roll_scores[question]
+                    entry.score = min(entry.score + marks, self.config.max_marks)
+                else:
+                    new_entry = ScoreEntry(
+                        roll_no=roll_no,
+                        anchor=question,
+                        score=min(marks, self.config.max_marks),
+                        max_marks=self.config.max_marks,
+                        comment="Grace mark applied",
+                        tags=["Grace mark applied"],
+                    )
+                    roll_scores[question] = new_entry
+            self.pending_grace = None
+            return {
+                "ok": True,
+                "message": f"Grace of {marks} applied to {question} for {affected_students} student(s).",
+            }
+        else:
+            count = 0
+            for roll_scores in self.scores.values():
+                for entry in roll_scores.values():
+                    new_score = min(entry.score + marks, self.config.max_marks)
+                    entry.score = new_score
+                    count += 1
+            self.pending_grace = None
+            return {"ok": True, "message": f"Grace of {marks} applied to {count} score(s)."}
 
     def cancel_bulk_grace(self) -> dict[str, Any]:
         if not self.pending_grace:
@@ -247,9 +297,13 @@ class GradeSession:
         student_summaries = []
         for roll_no, anchors in self.scores.items():
             score_map = {a: e.score for a, e in anchors.items()}
+            comment_map = {a: e.comment for a, e in anchors.items() if e.comment}
             avg = sum(score_map.values()) / len(score_map) if score_map else 0
             feedback = generate_feedback(
-                score_map, self.config.max_marks, self.config.mode
+                score_map,
+                self.config.max_marks,
+                self.config.mode,
+                comments=comment_map,
             )
             student_summaries.append(
                 {
@@ -316,7 +370,15 @@ def _entry_dict(entry: ScoreEntry) -> dict[str, Any]:
 def _extract_tags(comment: str) -> list[str]:
     """Extract meaningful educator tags from a sanitized comment."""
     TAG_PATTERNS = [
-        (r"diagram unclear|diagram.*needs improvement|needs improvement.*diagram", "diagram unclear"),
+        (r"current affairs|करंट\s*अफेयर्स", "current affairs"),
+        (
+            r"speaking fluency|articulation|fluency|hesitation|ठीक\s*से\s*बोलते\s*नहीं\s*आता|बोल\s*नहीं\s*पा",
+            "speaking fluency",
+        ),
+        (r"diagram clarity|diagram unclear|diagram.*needs improvement|needs improvement.*diagram|डायग्राम", "diagram unclear"),
+        (r"conceptual clarity|कॉन्सेप्ट|concept|बेसिक|basics", "conceptual clarity"),
+        (r"formulas and calculations|फॉर्मूला|formula|कैलकुलेशन|calculation", "formulas and calculations"),
+        (r"well-structured response|स्ट्रक्चर|good structure", "well-structured response"),
         (r"missing labels?", "missing labels"),
         (r"needs improvement", "needs improvement"),
         (r"unclear and incomplete", "unclear and incomplete"),
